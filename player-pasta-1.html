@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Meu Player</title>
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--mut:#6b6b6b;--card:#f2f2f4;--acc:#1db954;--on:#fff;--line:#e2e2e6;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#121214;--fg:#f1f1f3;--mut:#9a9aa3;--card:#1e1e22;--line:#2c2c32}}
+:root[data-theme="dark"]{--bg:#121214;--fg:#f1f1f3;--mut:#9a9aa3;--card:#1e1e22;--line:#2c2c32}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:flex;flex-direction:column;overflow:hidden}
+header{padding:14px 16px 8px;display:flex;gap:8px;align-items:center}
+h1{font-size:20px;margin:0;flex:1}
+button{font:inherit;color:var(--fg);background:var(--card);border:0;border-radius:12px;padding:10px 14px;cursor:pointer}
+button.acc{background:var(--acc);color:var(--on);font-weight:600}
+button.on{color:var(--acc);font-weight:700}
+#q{margin:0 16px 8px;padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--fg);font:inherit}
+#list{flex:1;overflow-y:auto;margin:0;padding:0 8px;list-style:none}
+#list li{display:flex;align-items:center;gap:8px;padding:12px 8px;border-bottom:1px solid var(--line)}
+#list li span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#list li.cur span{color:var(--acc);font-weight:600}
+#list li button{padding:6px 10px;background:none;color:var(--mut)}
+.empty{padding:40px 24px;text-align:center;color:var(--mut)}
+#bar{background:var(--card);padding:12px 16px 16px;border-top:1px solid var(--line)}
+#title{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:1.3em}
+#seek{width:100%;margin:8px 0 2px;accent-color:var(--acc)}
+.tm{display:flex;justify-content:space-between;color:var(--mut);font-size:12px}
+.ctl{display:flex;justify-content:space-between;align-items:center;margin-top:8px}
+.ctl button{background:none;font-size:22px;padding:8px 12px}
+#sh,#rp{opacity:.4;border-radius:12px}
+#sh.on,#rp.on{opacity:1;background:var(--acc);color:var(--on)}
+#fvf{opacity:.5}
+#fvf.on{opacity:1;background:var(--acc);color:var(--on)}
+.tr{display:flex;align-items:center;gap:8px}
+.tr #title{flex:1}
+#fv{background:none;padding:4px 8px;font-size:20px}
+#pp{background:var(--acc);color:var(--on);border-radius:50%;width:56px;height:56px;padding:0;font-size:24px}
+</style>
+</head>
+<body>
+<header>
+  <h1>🎵 Meu Player</h1>
+  <button id="fvf" title="Só favoritas">🤍</button><button id="re" style="display:none">↻</button><button id="add" class="acc">📁 Pasta</button>
+</header>
+<input type="file" id="file" accept="audio/*" multiple webkitdirectory hidden>
+<input id="q" type="search" placeholder="Buscar…">
+<div id="msg" class="empty" style="padding:8px 16px;display:none"></div><ul id="list"></ul>
+<div id="bar">
+  <div class="tr"><div id="title">Nenhuma música</div><button id="fv" title="Favoritar">🤍</button></div>
+  <input id="seek" type="range" min="0" max="1000" value="0">
+  <div class="tm"><span id="t1">0:00</span><span id="t2">0:00</span></div>
+  <div class="ctl">
+    <button id="sh" title="Aleatório">🔀</button>
+    <button id="pv">⏮</button>
+    <button id="pp">▶</button>
+    <button id="nx">⏭</button>
+    <button id="rp" title="Repetir">🔁</button>
+  </div>
+</div>
+<audio id="au" preload="auto"></audio>
+<script>
+const $=s=>document.querySelector(s);
+const au=$('#au');
+const EXT=/\.(mp3|m4a|aac|flac|ogg|oga|opus|wav|wma|webm)$/i;
+let favOnly=false;
+let db,dir=null,tracks=[],order=[],pos=-1,cur=null,url=null,shuffle=true,repeat='all';
+try{const s=JSON.parse(localStorage.getItem('pl')||'{}');if(typeof s.sh==='boolean')shuffle=s.sh;if(s.rp)repeat=s.rp;favOnly=!!s.fo}catch(e){}
+function save(){try{localStorage.setItem('pl',JSON.stringify({sh:shuffle,rp:repeat,fo:favOnly}))}catch(e){}}
+const hasFS='showDirectoryPicker' in window;
+
+// guarda só a referência da pasta (não copia as músicas)
+function openDB(){return new Promise((res,rej)=>{const r=indexedDB.open('meuplayer2',1);
+  r.onupgradeneeded=()=>r.result.createObjectStore('k');
+  r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)})}
+const kv=(m)=>db.transaction('k',m||'readonly').objectStore('k');
+const req=r=>new Promise((a,b)=>{r.onsuccess=()=>a(r.result);r.onerror=()=>b(r.error)});
+
+function msg(t){const m=$('#msg');m.textContent=t||'';m.style.display=t?'block':'none'}
+
+async function walk(d,prefix,out){
+  for await(const [name,h] of d.entries()){
+    if(h.kind==='directory')await walk(h,prefix+name+'/',out);
+    else if(EXT.test(name))out.push({name:name.replace(/\.[^.]+$/,''),path:prefix+name,handle:h});
+  }
+}
+async function scan(){
+  if(!dir)return;
+  msg('Buscando músicas…');
+  const out=[];
+  try{await walk(dir,'',out)}catch(e){msg('Não consegui ler a pasta. Toque em ↻ para reconectar.');return}
+  out.sort((a,b)=>a.path.localeCompare(b.path,'pt-BR'));
+  out.forEach((t,i)=>t.id=i);
+  const curPath=cur!=null&&tracks[cur]?tracks[cur].path:null;
+  tracks=out;
+  cur=curPath?(tracks.findIndex(t=>t.path===curPath)):null;
+  if(cur===-1)cur=null;
+  build(cur);msg(tracks.length?'':'Nenhuma música encontrada nessa pasta.');render();
+}
+async function connect(){
+  // precisa de toque do usuário para reautorizar o acesso
+  if(!dir)return;
+  const p=await dir.requestPermission({mode:'read'});
+  if(p==='granted'){$('#re').style.display='none';await scan()}
+}
+async function pick(){
+  if(hasFS){
+    try{
+      dir=await showDirectoryPicker({id:'musicas',mode:'read'});
+      await new Promise((res,rej)=>{const r=kv('readwrite').put(dir,'dir');r.onsuccess=res;r.onerror=()=>rej(r.error)});
+      $('#re').style.display='none';
+      await scan();
+    }catch(e){}
+  }else $('#file').click();
+}
+// plano B (sem acesso a pasta): lê os arquivos escolhidos só nesta sessão
+$('#file').onchange=e=>{
+  const fs=[...e.target.files].filter(f=>EXT.test(f.name)||f.type.startsWith('audio'));
+  tracks=fs.map((f,i)=>({id:i,name:f.name.replace(/\.[^.]+$/,''),path:f.webkitRelativePath||f.name,file:f}))
+    .sort((a,b)=>a.path.localeCompare(b.path,'pt-BR'));
+  tracks.forEach((t,i)=>t.id=i);cur=null;build(null);
+  msg(tracks.length?'Seu navegador não guarda a pasta: precisa escolher de novo a cada abertura.':'Nenhuma música encontrada.');
+  render();e.target.value='';
+};
+
+// Aleatório de verdade: embaralha tudo (Fisher-Yates) e só repete depois de tocar todas.
+const favs=new Set();
+try{JSON.parse(localStorage.getItem('fav')||'[]').forEach(p=>favs.add(p))}catch(e){}
+const isFav=t=>favs.has(t.path);
+// artista: "Artista - Título" no nome do arquivo, senão a primeira pasta
+function artistOf(t){
+  const seg=t.path.split('/'),base=seg[seg.length-1];
+  const m=base.match(/^(.+?)\s+[-–]\s+.+/);
+  if(m)return m[1].trim().toLowerCase();
+  return seg.length>1?seg[0].trim().toLowerCase():null;
+}
+const A=id=>{const t=tracks[id];if(t.artist===undefined)t.artist=artistOf(t);return t.artist};
+// Aleatório de verdade: embaralha tudo e só repete depois de tocar todas; evita o mesmo artista em sequência.
+function build(first,avoid){
+  const ids=tracks.filter(t=>!favOnly||isFav(t)).map(t=>t.id);
+  if(shuffle){
+    for(let i=ids.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[ids[i],ids[j]]=[ids[j],ids[i]]}
+    if(first!=null&&ids.includes(first)){ids.splice(ids.indexOf(first),1);ids.unshift(first)}
+    else if(avoid!=null){const k=ids.findIndex(id=>id!==avoid&&(A(id)===null||A(id)!==A(avoid)));if(k>0)[ids[0],ids[k]]=[ids[k],ids[0]]}
+    for(let i=1;i<ids.length;i++){
+      const a=A(ids[i-1]);
+      if(a!==null&&A(ids[i])===a){const j=ids.findIndex((id,x)=>x>i&&A(id)!==a);if(j>0)[ids[i],ids[j]]=[ids[j],ids[i]]}
+    }
+  }
+  order=ids;pos=first!=null?order.indexOf(first):-1;
+}
+function toggleFav(t){
+  if(!t)return;
+  isFav(t)?favs.delete(t.path):favs.add(t.path);
+  try{localStorage.setItem('fav',JSON.stringify([...favs]))}catch(e){}
+  if(favOnly)build(cur!=null&&isFav(tracks[cur])?cur:null);
+  render();
+}
+async function play(id){
+  const t=tracks[id];if(!t)return;
+  let f;
+  try{f=t.file||await t.handle.getFile()}catch(e){msg('Não consegui abrir esse arquivo. Toque em ↻ para atualizar.');return}
+  if(url)URL.revokeObjectURL(url);
+  url=URL.createObjectURL(f);au.src=url;cur=id;pos=order.indexOf(id);
+  try{await au.play()}catch(e){}
+  $('#title').textContent=t.name;
+  if('mediaSession' in navigator){navigator.mediaSession.metadata=new MediaMetadata({title:t.name,artist:'Meu Player'})}
+  render();
+}
+function next(auto){
+  if(!order.length)return;
+  if(auto&&repeat==='one'){au.currentTime=0;au.play();return}
+  let p=pos+1;
+  if(p>=order.length){
+    if(auto&&repeat==='off'){return}
+    build(null,cur);if(!order.length)return;
+    p=0;
+  }
+  play(order[p]);
+}
+function prev(){
+  if(au.currentTime>3||pos<=0){au.currentTime=0;return}
+  play(order[pos-1]);
+}
+function toggle(){
+  if(cur==null){build(null);if(!order.length)return;play(order[0]);return}
+  au.paused?au.play():au.pause();
+}
+function ui(){
+  $('#sh').classList.toggle('on',shuffle);$('#sh').setAttribute('aria-pressed',shuffle);
+  $('#rp').classList.toggle('on',repeat!=='off');
+  $('#rp').textContent=repeat==='one'?'🔂':'🔁';
+  $('#pp').textContent=au.paused?'▶':'⏸';
+  $('#fvf').classList.toggle('on',favOnly);$('#fvf').textContent=favOnly?'❤️':'🤍';
+  const ct=cur!=null?tracks[cur]:null;$('#fv').textContent=ct&&isFav(ct)?'❤️':'🤍';
+}
+function render(){
+  ui();
+  const q=$('#q').value.trim().toLowerCase(),ul=$('#list');
+  ul.innerHTML='';
+  if(!tracks.length){if(!$('#msg').textContent)ul.innerHTML='<div class="empty">Toque em “📁 Pasta” e escolha a pasta de músicas do celular. Da próxima vez ela é buscada sozinha.</div>';return}
+  const vis=tracks.filter(t=>t.path.toLowerCase().includes(q)&&(!favOnly||isFav(t)));
+  if(!vis.length&&favOnly){ul.innerHTML='<div class="empty">Nenhuma favorita ainda. Toque no 🤍 das músicas para marcar.</div>';return}
+  vis.forEach(t=>{
+    const li=document.createElement('li');if(t.id===cur)li.className='cur';
+    const sp=document.createElement('span');sp.textContent=t.name;
+    li.onclick=()=>{if(shuffle)build(t.id);play(t.id)};
+    const h=document.createElement('button');h.textContent=isFav(t)?'❤️':'🤍';
+    h.onclick=e=>{e.stopPropagation();toggleFav(t)};
+    li.append(sp,h);ul.append(li);
+  });
+}
+const fmt=s=>{s=Math.floor(s||0);return Math.floor(s/60)+':'+String(s%60).padStart(2,'0')};
+
+$('#add').onclick=pick;
+$('#re').onclick=async()=>{if(dir&&(await dir.queryPermission({mode:'read'}))!=='granted')await connect();else await scan()};
+$('#q').oninput=render;
+$('#fv').onclick=()=>{if(cur!=null)toggleFav(tracks[cur])};
+$('#fvf').onclick=()=>{favOnly=!favOnly;save();build(cur!=null&&(!favOnly||isFav(tracks[cur]))?cur:null);render()};
+$('#pp').onclick=toggle;$('#nx').onclick=()=>next(false);$('#pv').onclick=prev;
+$('#sh').onclick=()=>{shuffle=!shuffle;build(cur);save();ui()};
+$('#rp').onclick=()=>{repeat=repeat==='all'?'one':repeat==='one'?'off':'all';save();ui()};
+$('#seek').oninput=e=>{if(au.duration)au.currentTime=au.duration*e.target.value/1000};
+au.onended=()=>next(true);
+au.onplay=au.onpause=ui;
+au.ontimeupdate=()=>{
+  if(au.duration){$('#seek').value=au.currentTime/au.duration*1000;$('#t2').textContent=fmt(au.duration)}
+  $('#t1').textContent=fmt(au.currentTime);
+};
+if('mediaSession' in navigator){
+  const ms=navigator.mediaSession;
+  ms.setActionHandler('play',()=>au.play());ms.setActionHandler('pause',()=>au.pause());
+  ms.setActionHandler('nexttrack',()=>next(false));ms.setActionHandler('previoustrack',prev);
+  try{ms.setActionHandler('seekto',d=>{au.currentTime=d.seekTime})}catch(e){}
+}
+(async()=>{
+  ui();render();
+  if(!hasFS)return;
+  try{db=await openDB();dir=await req(kv().get('dir'))}catch(e){}
+  if(!dir)return;
+  $('#re').style.display='';
+  try{
+    if((await dir.queryPermission({mode:'read'}))==='granted'){$('#re').style.display='none';await scan()}
+    else msg('Toque em ↻ para liberar o acesso à pasta salva.');
+  }catch(e){}
+})();
+</script>
+</body>
+</html>
